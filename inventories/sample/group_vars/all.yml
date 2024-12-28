@@ -41,6 +41,9 @@ openvpn_instances:
 # Set this to false to disable this prompt.
 prompt_before_syncing_clients: true
 
+# generate a random password for the private keys of the clients
+generate_pk_passwords: true
+
 # maintain a list of your valid_clients here, used by the `sync_clients.yml` playbook
 valid_clients:
   - laptop
