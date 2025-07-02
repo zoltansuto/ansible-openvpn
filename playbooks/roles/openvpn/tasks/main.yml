@@ -9,7 +9,7 @@
   notify:
     - clear history
 
-- include: packages.yml
-- include: pki.yml
-- include: openvpn.yml
-- include: firewall.yml
+- import_tasks: packages.yml
+- import_tasks: pki.yml
+- import_tasks: openvpn.yml
+- import_tasks: firewall.yml
