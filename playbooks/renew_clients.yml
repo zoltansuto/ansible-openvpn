@@ -1,0 +1,7 @@
+- name: Renew client certificates/keys
+# ========================================================
+  # Allows caller to override hosts using '-e cmd_hosts='
+  hosts: "{{ cmd_hosts | default('openvpn') }}"
+
+  roles:
+    - renew_clients

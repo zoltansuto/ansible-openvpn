@@ -1,0 +1,210 @@
+---
+- name: OpenVPN | Renew Clients | Set variables
+  include_vars: ../../openvpn/defaults/main.yml
+
+- name: OpenVPN | Renew Clients | Register the OpenVPN server common name
+  command: cat {{ openvpn_server_common_name_file }}
+  no_log: true
+  register: openvpn_server_common_name_result
+  changed_when: false
+
+- name: OpenVPN | Renew Clients | Set server common name variable
+  set_fact:
+    openvpn_server_common_name: "{{ openvpn_server_common_name_result.stdout }}"
+
+- name: OpenVPN | Renew Clients | Set clients to renew
+  set_fact:
+    clients_to_renew: "{{ clients_to_renew | default(valid_clients) }}"
+
+- name: OpenVPN | Renew Clients | Check certificate status
+  shell: awk '/^V.*CN={{ item }}/' {{ openvpn_path_pki }}/index.txt | wc -l
+  register: cert_status
+  changed_when: false
+  with_items: "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Revoke existing valid certificates
+  expect:
+    command: ./easyrsa revoke {{ item[0] }}
+    responses:
+      'Enter pass phrase for .*?:$': "{{ ca_password }}"
+    chdir: "{{ openvpn_path_easyrsa }}"
+  no_log: true
+  with_together:
+    - "{{ clients_to_renew }}"
+    - "{{ cert_status.results }}"
+  when: item[1].stdout | int > 0
+
+- name: OpenVPN | Renew Clients | Rebuild CRL after revocation
+  expect:
+    command: ./easyrsa gen-crl
+    responses:
+      'Enter pass phrase for .*?:$': "{{ ca_password }}"
+    chdir: "{{ openvpn_path_easyrsa }}"
+
+- name: OpenVPN | Renew Clients | Remove existing client keys
+  file:
+    path: "{{ openvpn_path_keys }}/{{ item }}.key"
+    state: absent
+  with_items: "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Remove existing client certificates
+  file:
+    path: "{{ openvpn_path_certs }}/{{ item }}.crt"
+    state: absent
+  with_items: "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Remove existing client requests
+  file:
+    path: "{{ openvpn_path_reqs }}/{{ item }}.req"
+    state: absent
+  with_items: "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Regenerate client certificates
+  expect:
+    command: ./easyrsa build-client-full "{{ item }}" nopass --req-cn "{{ item }}"
+    responses:
+      'Enter pass phrase for .*?:$': "{{ ca_password }}"
+    chdir: "{{ openvpn_path_easyrsa }}"
+  no_log: true
+  with_items: "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Make client configuration directory
+  file:
+    path: "{{ openvpn_path_pki }}/ovpn"
+    mode: 0700
+    state: directory
+
+- name: OpenVPN | Renew Clients | Register CA certificate contents
+  command: cat {{ openvpn_ca_cert }}
+  no_log: true
+  register: openvpn_ca_contents
+  changed_when: false
+
+- name: OpenVPN | Renew Clients | Register HMAC firewall key contents
+  command: cat {{ openvpn_hmac_firewall }}
+  no_log: true
+  register: openvpn_hmac_firewall_contents
+  changed_when: false
+
+- name: OpenVPN | Renew Clients | Register client key contents
+  command: cat "{{ openvpn_path_keys }}/{{ item }}.key"
+  with_items: "{{ clients_to_renew }}"
+  no_log: true
+  register: openvpn_client_keys
+  changed_when: false
+
+- name: OpenVPN | Renew Clients | Register client certificate contents
+  command: cat "{{ openvpn_path_certs }}/{{ item }}.crt"
+  with_items: "{{ clients_to_renew }}"
+  no_log: true
+  register: openvpn_client_certs
+  changed_when: false
+
+- name: OpenVPN | Renew Clients | Build client configs (.ovpn files; pki embedded)
+  template:
+    src: ../../add_clients/templates/client_pki_embedded.ovpn.j2
+    dest: "{{ openvpn_path_pki }}/ovpn/{{ item[0] }}-pki-embedded.ovpn"
+    mode: 0400
+  no_log: true
+  with_together:
+    - "{{ clients_to_renew }}"
+    - "{{ openvpn_client_certs.results }}"
+    - "{{ openvpn_client_keys.results }}"
+
+- name: OpenVPN | Renew Clients | Build client configs (.ovpn files; pki external files)
+  template:
+    src: ../../add_clients/templates/client_pki_files.ovpn.j2
+    dest: "{{ openvpn_path_pki }}/ovpn/{{ item }}-pki-files.ovpn"
+    mode: 0400
+  no_log: true
+  with_items:
+    - "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Build client configs (.ovpn files; external pkcs12)
+  template:
+    src: ../../add_clients/templates/client_pkcs12.ovpn.j2
+    dest: "{{ openvpn_path_pki }}/ovpn/{{ item }}-pkcs12.ovpn"
+    mode: 0400
+  no_log: true
+  with_items:
+    - "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Generate PKCS#12 without passwords
+  shell: >
+    openssl pkcs12 -export
+    -in "{{ openvpn_path_certs }}/{{ item }}.crt"
+    -inkey "{{ openvpn_path_keys }}/{{ item }}.key"
+    -certfile {{ openvpn_ca_cert }}
+    -name "{{ item }}"
+    -out "{{ openvpn_path_pki }}/ovpn/{{ item }}.p12"
+    -passout pass:
+  args:
+    creates: "{{ openvpn_path_pki }}/ovpn/{{ item }}.p12"
+  no_log: true
+  with_items:
+    - "{{ clients_to_renew }}"
+  tags:
+    - skip_ansible_lint
+
+- name: OpenVPN | Renew Clients | Fetch renewed .ovpn files (*-pki-embedded.ovpn)
+  fetch:
+    src: "{{ openvpn_path_pki }}/ovpn/{{ item }}-pki-embedded.ovpn"
+    dest: "{{ local_creds_folder }}/{{ item }}/"
+    flat: yes
+  with_items:
+    - "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Fetch renewed .ovpn files (*-pki-files.ovpn)
+  fetch:
+    src: "{{ openvpn_path_pki }}/ovpn/{{ item }}-pki-files.ovpn"
+    dest: "{{ local_creds_folder }}/{{ item }}/"
+    flat: yes
+  with_items:
+    - "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Fetch renewed .ovpn files (*-pkcs12.ovpn)
+  fetch:
+    src: "{{ openvpn_path_pki }}/ovpn/{{ item }}-pkcs12.ovpn"
+    dest: "{{ local_creds_folder }}/{{ item }}/"
+    flat: yes
+  with_items:
+    - "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Fetch renewed client PKCS#12 files
+  fetch:
+    src: "{{ openvpn_path_pki }}/ovpn/{{ item }}.p12"
+    dest: "{{ local_creds_folder }}/{{ item }}/"
+    flat: yes
+  with_items:
+    - "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Fetch renewed client CA cert
+  fetch:
+    src: "{{ openvpn_ca_cert }}"
+    dest: "{{ local_creds_folder }}/{{ item }}/"
+    flat: yes
+  with_items:
+    - "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Fetch renewed client certs
+  fetch:
+    src: "{{ openvpn_path_certs }}/{{ item }}.crt"
+    dest: "{{ local_creds_folder }}/{{ item }}/"
+    flat: yes
+  with_items:
+    - "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Fetch renewed client keys
+  fetch:
+    src: "{{ openvpn_path_keys }}/{{ item }}.key"
+    dest: "{{ local_creds_folder }}/{{ item }}/"
+    flat: yes
+  with_items:
+    - "{{ clients_to_renew }}"
+
+- name: OpenVPN | Renew Clients | Clear bash history
+  shell: cat /dev/null > ~/.bash_history && history -c
+  args:
+    executable: /bin/bash
+  ignore_errors: true
+  changed_when: false
